@@ -1,7 +1,24 @@
+// Package memfs implements an in memory http.FileSystem.
+//
+// The filesystem can be statically generated, or loaded (and modified) at runtime.
+// It is safe for concurrent reads (not writes), and biased towards read performance.
+//
+// File names should be slash separated, and rooted (start with a slash).
+// Directories are implicit.
+// Files can be gzip-compressed in memory.
+// Methods are provided to serve gziped content directly to accepting HTTP clients.
+//
+// Usage:
+//	assets, err = memfs.LoadCompressed(http.Dir("static"), gzip.BestCompression)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	log.Fatal(http.ListenAndServe("localhost:http", fs))
 package memfs
 
 import (
 	"compress/gzip"
+	"encoding/binary"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -15,22 +32,27 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
+// FileSystem is the in memory http.FileSystem implementation.
 type FileSystem struct {
-	objs map[string]*object
+	objs map[string]object
 	dirs map[string][]string
 }
 
+// Creates an empty FileSystem instance.
 func Create() *FileSystem {
 	return &FileSystem{
-		objs: map[string]*object{},
+		objs: map[string]object{},
 		dirs: map[string][]string{"/": nil},
 	}
 }
 
+// Loads the contents of an http.FileSystem into a new FileSystem instance.
 func Load(in http.FileSystem) (*FileSystem, error) {
 	return LoadCompressed(in, gzip.NoCompression)
 }
 
+// Loads the contents of an http.FileSystem into a new FileSystem instance.
+// Files are compressed with the specified gzip compression level.
 func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
 	fs := Create()
 	if err := fs.load(in, "/", level); err != nil {
@@ -65,9 +87,13 @@ func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
 	return nil
 }
 
+// Open implements http.FileSystem, opening files for reading.
+// Compressed files are decompressed on-the-fly.
+// Seeking support is limited for compressed files: they can be seeked, but subsequent reads might fail.
+// Rewinding to the start is supported for all files.
 func (fs *FileSystem) Open(name string) (http.File, error) {
 	if o, ok := fs.objs[name]; ok {
-		return &file{obj: o}, nil
+		return &file{object: o}, nil
 	}
 	if d, ok := fs.dirs[name]; ok {
 		return &dir{name: name, list: d, fs: fs}, nil
@@ -75,6 +101,7 @@ func (fs *FileSystem) Open(name string) (http.File, error) {
 	return nil, os.ErrNotExist
 }
 
+// Stat is a shortcut for fs.Open(name).Stat().
 func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	if o, ok := fs.objs[name]; ok {
 		return o, nil
@@ -85,6 +112,8 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	return nil, os.ErrNotExist
 }
 
+// Creates a file. Overwrites an existing file (but not a directory).
+// Sniffs the MIME type if one is not provided.
 func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
 	if _, ok := fs.dirs[name]; ok {
 		return os.ErrExist
@@ -104,7 +133,7 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 
 	n, err = io.Copy(&builder, content)
 	if err == nil {
-		fs.put(name, &object{
+		fs.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
@@ -114,6 +143,9 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 	return err
 }
 
+// Creates a compressed file. Overwrites an existing file (but not a directory).
+// Files are compressed with the specified gzip compression level.
+// Sniffs the MIME type if one is not provided.
 func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
 	if level == gzip.NoCompression {
 		return fs.Create(name, mimetype, modtime, content)
@@ -140,7 +172,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 		err = gzip.Flush()
 	}
 	if err == nil && 4*n >= 5*int64(builder.Len()) {
-		fs.put(name, &object{
+		fs.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
@@ -156,7 +188,38 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 	return err
 }
 
-func (fs *FileSystem) put(name string, obj *object) {
+// Creates a file from a string. This intended to be used by code generators.
+// Overwrites an existing file (but panics if it's a directory).
+// MIME type will NOT be sniffed and content will NOT be compressed.
+// If content is already gzipped (but MIME type and extension don't match that) it'll get decompressed on-the-fly.
+// You're strongly encouraged to provide a MIME type, particularly for compressed files.
+func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, content string) {
+	if _, ok := fs.dirs[name]; ok {
+		panic(os.ErrExist)
+	}
+
+	size := len(content)
+	if len(content) >= 10+8 &&
+		// check for gzipped content
+		strings.HasPrefix(content, "\x1f\x8b") &&
+		// which should not be gzipped content
+		mimetype != "application/gzip" &&
+		mimetype != "application/x-gzip" &&
+		path.Ext(name) != ".gz" {
+		// get the uncompressed length
+		size = int(binary.LittleEndian.Uint32([]byte(content[size-4:])))
+		// it'll get decompressed on-the-fly
+	}
+
+	fs.put(name, object{
+		size: size,
+		time: modtime,
+		mime: mimetype,
+		data: content,
+	})
+}
+
+func (fs *FileSystem) put(name string, obj object) {
 	dir, file := path.Split(name)
 	obj.name = file
 	fs.objs[name] = obj
@@ -196,15 +259,15 @@ type object struct {
 	mime string
 }
 
-func (o *object) Name() string       { return o.name }
-func (o *object) Size() int64        { return int64(o.size) }
-func (o *object) Mode() os.FileMode  { return 0444 }
-func (o *object) ModTime() time.Time { return o.time }
-func (o *object) IsDir() bool        { return false }
-func (o *object) Sys() interface{}   { return nil }
+func (o object) Name() string       { return o.name }
+func (o object) Size() int64        { return int64(o.size) }
+func (o object) Mode() os.FileMode  { return 0444 }
+func (o object) ModTime() time.Time { return o.time }
+func (o object) IsDir() bool        { return false }
+func (o object) Sys() interface{}   { return nil }
 
 type file struct {
-	obj    *object
+	object
 	pos    int
 	reader io.ReadCloser
 }
@@ -221,17 +284,17 @@ func (f *file) Read(p []byte) (n int, err error) {
 	if f.pos < 0 {
 		return 0, os.ErrClosed
 	}
-	if f.pos >= f.obj.size {
+	if f.pos >= f.size {
 		return 0, io.EOF
 	}
 	if f.reader == nil {
-		if len(f.obj.data) == f.obj.size {
-			f.reader = ioutil.NopCloser(strings.NewReader(f.obj.data[f.pos:]))
+		if len(f.data) == f.size {
+			f.reader = ioutil.NopCloser(strings.NewReader(f.data[f.pos:]))
 		} else {
 			if f.pos > 0 {
 				return 0, errors.New("read after seek in compressed file")
 			}
-			f.reader, err = gzip.NewReader(strings.NewReader(f.obj.data))
+			f.reader, err = gzip.NewReader(strings.NewReader(f.data))
 			if err != nil {
 				return
 			}
@@ -253,7 +316,7 @@ func (f *file) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekCurrent:
 		npos = int64(f.pos) + offset
 	case io.SeekEnd:
-		npos = int64(f.obj.size) + offset
+		npos = int64(f.size) + offset
 	default:
 		return 0, os.ErrInvalid
 	}
@@ -271,7 +334,7 @@ func (f *file) Readdir(count int) ([]os.FileInfo, error) {
 }
 
 func (f *file) Stat() (os.FileInfo, error) {
-	return f.obj, nil
+	return f, nil
 }
 
 type dir struct {
@@ -333,16 +396,47 @@ func (d *dir) ModTime() time.Time { return time.Time{} }
 func (d *dir) IsDir() bool        { return true }
 func (d *dir) Sys() interface{}   { return nil }
 
+// ServeHTTP implements http.Handler, replacing http.FileServer.
 func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Path
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
 		r.URL.Path = name
 	}
-	fs.ServeFile(w, r, path.Clean(name))
+	fs.serveFile(w, r, path.Clean(name))
 }
 
+// Like http.ServeFile.
 func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name string) {
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	r.URL.Path = name
+	fs.serveFile(w, r, path.Clean(name))
+}
+
+// Like http.ServeContent.
+func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
+	if o, ok := fs.objs[name]; ok {
+		header := w.Header()
+		if o.mime != "" {
+			header.Set("Content-Type", o.mime)
+		}
+		if len(o.data) != o.size {
+			header.Add("Vary", "Accept-Encoding")
+			if httpguts.HeaderValuesContainsToken(r.Header["Accept-Encoding"], "gzip") {
+				header.Add("Content-Encoding", "gzip")
+				http.ServeContent(w, r, o.name, o.time, strings.NewReader(o.data))
+				return
+			}
+		}
+		http.ServeContent(w, r, o.name, o.time, &file{object: o})
+	} else {
+		http.NotFound(w, r)
+	}
+}
+
+func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name string) {
 	if _, ok := fs.dirs[name]; ok {
 		name = strings.TrimSuffix(name, "/") + "/index.html"
 	}
