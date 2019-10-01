@@ -396,7 +396,7 @@ func (d *dir) ModTime() time.Time { return time.Time{} }
 func (d *dir) IsDir() bool        { return true }
 func (d *dir) Sys() interface{}   { return nil }
 
-// ServeHTTP implements http.Handler, replacing http.FileServer.
+// ServeHTTP implements http.Handler, replacing the need for http.FileServer.
 func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Path
 	if !strings.HasPrefix(name, "/") {
@@ -406,7 +406,7 @@ func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fs.serveFile(w, r, path.Clean(name))
 }
 
-// Like http.ServeFile.
+// Like http.ServeFile. Lists directories with no index.html. Redirects to canonical paths.
 func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name string) {
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
@@ -415,7 +415,7 @@ func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name str
 	fs.serveFile(w, r, path.Clean(name))
 }
 
-// Like http.ServeContent.
+// Like http.ServeContent. Serves the named file. Doesn't list directories. No redirects or rewrites.
 func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
 	if o, ok := fs.objs[name]; ok {
 		header := w.Header()
