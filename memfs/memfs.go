@@ -17,6 +17,7 @@
 package memfs
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/binary"
 	"errors"
@@ -128,16 +129,16 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 		return err
 	}
 
-	var builder strings.Builder
-	builder.Grow(int(n))
+	var buf strings.Builder
+	buf.Grow(int(n))
 
-	n, err = io.Copy(&builder, content)
+	n, err = io.Copy(&buf, content)
 	if err == nil {
 		fs.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
-			data: builder.String(),
+			data: buf.String(),
 		})
 	}
 	return err
@@ -158,25 +159,34 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 	if err != nil {
 		return err
 	}
+	n, err := seekerLen(content)
+	if err != nil {
+		return err
+	}
+	if n < 1024 {
+		return fs.Create(name, mimetype, modtime, content)
+	}
 
-	var builder strings.Builder
+	var buf bytes.Buffer
+	buf.Grow(int(n))
 
-	gzip, err := gzip.NewWriterLevel(&builder, level)
+	gzip, err := gzip.NewWriterLevel(&buf, level)
 	if err != nil {
 		return err
 	}
 	defer gzip.Close()
+	gzip.ModTime = modtime
 
-	n, err := io.Copy(gzip, content)
+	n, err = io.Copy(gzip, content)
 	if err == nil {
-		err = gzip.Flush()
+		err = gzip.Close()
 	}
-	if err == nil && 4*n >= 5*int64(builder.Len()) {
+	if err == nil && 4*n >= 5*int64(buf.Len()) {
 		fs.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
-			data: builder.String(),
+			data: buf.String(),
 		})
 		return nil
 	}
@@ -199,13 +209,11 @@ func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, con
 	}
 
 	size := len(content)
-	if len(content) >= 10+8 &&
+	if size >= 10+8 &&
 		// check for gzipped content
-		strings.HasPrefix(content, "\x1f\x8b") &&
+		content[0] == 0x1f && content[1] == 0x8b && content[2] == 8 &&
 		// which should not be gzipped content
-		mimetype != "application/gzip" &&
-		mimetype != "application/x-gzip" &&
-		path.Ext(name) != ".gz" {
+		mimetype != "application/gzip" && mimetype != "application/x-gzip" {
 		// get the uncompressed length
 		size = int(binary.LittleEndian.Uint32([]byte(content[size-4:])))
 		// it'll get decompressed on-the-fly
