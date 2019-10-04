@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
-	"errors"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -90,8 +89,7 @@ func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
 
 // Open implements http.FileSystem, opening files for reading.
 // Compressed files are decompressed on-the-fly.
-// Seeking support is limited for compressed files: they can be seeked, but subsequent reads might fail.
-// Rewinding to the start is supported for all files.
+// Seeking compressed files is emulated and can be extremely slow.
 func (fs *FileSystem) Open(name string) (http.File, error) {
 	if o, ok := fs.objs[name]; ok {
 		return &file{object: o}, nil
@@ -299,10 +297,13 @@ func (f *file) Read(p []byte) (n int, err error) {
 		if len(f.data) == f.size {
 			f.reader = ioutil.NopCloser(strings.NewReader(f.data[f.pos:]))
 		} else {
-			if f.pos > 0 {
-				return 0, errors.New("read after seek in compressed file")
-			}
 			f.reader, err = gzip.NewReader(strings.NewReader(f.data))
+			if err == nil && f.pos > 0 {
+				var n64 int64
+				n64, err = io.CopyN(ioutil.Discard, f.reader, int64(f.pos))
+				n = int(n64)
+				f.pos = n
+			}
 			if err != nil {
 				return
 			}
@@ -472,7 +473,7 @@ type rawFileSystem struct {
 
 func (fs rawFileSystem) Open(name string) (http.File, error) {
 	if o, ok := fs.objs[name]; ok {
-		return rawFile{strings.NewReader(o.data), o}, nil
+		return rawFile{o, strings.NewReader(o.data)}, nil
 	}
 	if d, ok := fs.dirs[name]; ok {
 		return &dir{name: name, list: d, fs: fs.FileSystem}, nil
@@ -481,8 +482,12 @@ func (fs rawFileSystem) Open(name string) (http.File, error) {
 }
 
 type rawFile struct {
-	io.ReadSeeker
 	os.FileInfo
+	*strings.Reader
+}
+
+func (f rawFile) Size() int64 {
+	return int64(f.Len())
 }
 
 func (f rawFile) Close() error {
