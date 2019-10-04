@@ -19,7 +19,6 @@ package memfs
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/binary"
 	"io"
 	"io/ioutil"
 	"mime"
@@ -111,8 +110,9 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	return nil, os.ErrNotExist
 }
 
-// Creates a file. Overwrites an existing file (but not a directory).
-// Sniffs the MIME type if one is not provided.
+// Creates a file.
+// Overwrites an existing file (but not a directory).
+// Sniffs the MIME type if none is provided.
 func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
 	if _, ok := fs.dirs[name]; ok {
 		return os.ErrExist
@@ -142,9 +142,10 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 	return err
 }
 
-// Creates a compressed file. Overwrites an existing file (but not a directory).
+// Creates a compressed file.
+// Overwrites an existing file (but not a directory).
 // Files are compressed with the specified gzip compression level.
-// Sniffs the MIME type if one is not provided.
+// Sniffs the MIME type if none is provided.
 func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
 	if level == gzip.NoCompression {
 		return fs.Create(name, mimetype, modtime, content)
@@ -196,25 +197,14 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 	return err
 }
 
-// Creates a file from a string. This intended to be used by code generators.
-// Overwrites an existing file (but panics if it's a directory).
+// Creates a file from a string.
+// This intended to be used by code generators.
+// Overwrites an existing file (panics if it's a directory).
 // MIME type will NOT be sniffed and content will NOT be compressed.
-// If content is already gzipped (but MIME type and extension don't match that) it'll get decompressed on-the-fly.
-// You're strongly encouraged to provide a MIME type, particularly for compressed files.
-func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, content string) {
+// If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
+func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, size int, content string) {
 	if _, ok := fs.dirs[name]; ok {
 		panic(os.ErrExist)
-	}
-
-	size := len(content)
-	if size >= 10+8 &&
-		// check for gzipped content
-		content[0] == 0x1f && content[1] == 0x8b && content[2] == 8 &&
-		// which should not be gzipped content
-		mimetype != "application/gzip" && mimetype != "application/x-gzip" {
-		// get the uncompressed length
-		size = int(binary.LittleEndian.Uint32([]byte(content[size-4:])))
-		// it'll get decompressed on-the-fly
 	}
 
 	fs.put(name, object{
