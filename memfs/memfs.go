@@ -19,12 +19,15 @@ package memfs
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
+	"hash/crc32"
 	"io"
 	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -127,16 +130,18 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 		return err
 	}
 
+	var hash = crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	var buf strings.Builder
 	buf.Grow(int(n))
 
-	n, err = io.Copy(&buf, content)
+	n, err = io.Copy(io.MultiWriter(&buf, hash), content)
 	if err == nil {
 		fs.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
 			data: buf.String(),
+			hash: hash.Sum32(),
 		})
 	}
 	return err
@@ -186,6 +191,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 			time: modtime,
 			mime: mimetype,
 			data: buf.String(),
+			hash: binary.LittleEndian.Uint32(buf.Bytes()[buf.Len()-8 : buf.Len()-4]),
 		})
 		return nil
 	}
@@ -202,7 +208,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 // Overwrites an existing file (panics if it's a directory).
 // MIME type will NOT be sniffed and content will NOT be compressed.
 // If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
-func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, size int, content string) {
+func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
 	if _, ok := fs.dirs[name]; ok {
 		panic(os.ErrExist)
 	}
@@ -212,6 +218,7 @@ func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, siz
 		time: modtime,
 		mime: mimetype,
 		data: content,
+		hash: hash,
 	})
 }
 
@@ -253,6 +260,7 @@ type object struct {
 	size int
 	time time.Time
 	mime string
+	hash uint32
 }
 
 func (o object) Name() string       { return o.name }
@@ -397,12 +405,7 @@ func (d *dir) Sys() interface{}   { return nil }
 
 // ServeHTTP implements http.Handler, replacing the need for http.FileServer.
 func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	name := r.URL.Path
-	if !strings.HasPrefix(name, "/") {
-		name = "/" + name
-		r.URL.Path = name
-	}
-	fs.serveFile(w, r, path.Clean(name))
+	fs.ServeFile(w, r, r.URL.Path)
 }
 
 // Like http.ServeFile. Lists directories with no index.html. Redirects to canonical paths.
@@ -417,17 +420,9 @@ func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name str
 // Like http.ServeContent. Serves the named file. Doesn't list directories. No redirects or rewrites.
 func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
 	if o, ok := fs.objs[name]; ok {
-		header := w.Header()
-		if o.mime != "" {
-			header.Set("Content-Type", o.mime)
-		}
-		if len(o.data) != o.size {
-			header.Add("Vary", "Accept-Encoding")
-			if httpguts.HeaderValuesContainsToken(r.Header["Accept-Encoding"], "gzip") {
-				header.Add("Content-Encoding", "gzip")
-				http.ServeContent(w, r, o.name, o.time, strings.NewReader(o.data))
-				return
-			}
+		if setHeaders(w, r, &o) {
+			http.ServeContent(w, r, o.name, o.time, strings.NewReader(o.data))
+			return
 		}
 		http.ServeContent(w, r, o.name, o.time, &file{object: o})
 	} else {
@@ -440,21 +435,34 @@ func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name str
 		name = strings.TrimSuffix(name, "/") + "/index.html"
 	}
 	if o, ok := fs.objs[name]; ok {
-		header := w.Header()
-		if o.mime != "" {
-			header.Set("Content-Type", o.mime)
-		}
-		if len(o.data) != o.size {
-			header.Add("Vary", "Accept-Encoding")
-			if httpguts.HeaderValuesContainsToken(r.Header["Accept-Encoding"], "gzip") {
-				header.Add("Content-Encoding", "gzip")
-				http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
-				return
-			}
+		if setHeaders(w, r, &o) {
+			http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
+			return
 		}
 	}
-
 	http.FileServer(fs).ServeHTTP(w, r)
+}
+
+func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
+	header := w.Header()
+	if len(o.data) != o.size {
+		header.Add("Vary", "Accept-Encoding")
+		if httpguts.HeaderValuesContainsToken(r.Header["Accept-Encoding"], "gzip") {
+			header.Set("Content-Encoding", "gzip")
+			gzip = true
+		}
+	}
+	if o.mime != "" {
+		header.Set("Content-Type", o.mime)
+	}
+	if o.hash != 0 {
+		if tag := strconv.FormatUint(uint64(o.hash), 36); gzip {
+			header.Set("ETag", `"`+tag+`z"`)
+		} else {
+			header.Set("ETag", `"`+tag+`"`)
+		}
+	}
+	return
 }
 
 type rawFileSystem struct {
