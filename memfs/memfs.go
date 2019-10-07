@@ -54,7 +54,7 @@ func Load(in http.FileSystem) (*FileSystem, error) {
 }
 
 // Loads the contents of an http.FileSystem into a new FileSystem instance.
-// Files are compressed with the specified gzip compression level.
+// Files are gzip-compressed with the specified compression level.
 func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
 	fs := Create()
 	if err := fs.load(in, "/", level); err != nil {
@@ -121,11 +121,11 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 		return os.ErrExist
 	}
 
-	mimetype, err := sniffType(name, mimetype, content)
+	mimetype, err := getType(name, mimetype, content)
 	if err != nil {
 		return err
 	}
-	n, err := seekerLen(content)
+	n, err := getSize(content)
 	if err != nil {
 		return err
 	}
@@ -149,7 +149,7 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 
 // Creates a compressed file.
 // Overwrites an existing file (but not a directory).
-// Files are compressed with the specified gzip compression level.
+// Files are gzip-compressed with the specified compression level.
 // Sniffs the MIME type if none is provided.
 func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
 	if level == gzip.NoCompression {
@@ -159,11 +159,11 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 		return os.ErrExist
 	}
 
-	mimetype, err := sniffType(name, mimetype, content)
+	mimetype, err := getType(name, mimetype, content)
 	if err != nil {
 		return err
 	}
-	n, err := seekerLen(content)
+	n, err := getSize(content)
 	if err != nil {
 		return err
 	}
@@ -191,7 +191,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 			time: modtime,
 			mime: mimetype,
 			data: buf.String(),
-			hash: binary.LittleEndian.Uint32(buf.Bytes()[buf.Len()-8 : buf.Len()-4]),
+			hash: getHash(buf.Bytes(), n),
 		})
 		return nil
 	}
@@ -227,9 +227,9 @@ func (fs *FileSystem) put(name string, obj object) {
 	obj.name = file
 	fs.objs[name] = obj
 
-	contains := func(slice []string, str string) bool {
-		for i := len(slice) - 1; i >= 0; i-- {
-			if slice[i] == str {
+	var contains = func(slice []string, str string) bool {
+		for _, s := range slice {
+			if s == str {
 				return true
 			}
 		}
@@ -237,7 +237,8 @@ func (fs *FileSystem) put(name string, obj object) {
 	}
 
 	for {
-		if len(dir) > 1 {
+		if len(dir) > 1 { // dir != "/"
+			// remove trailing slash
 			dir = dir[:len(dir)-1]
 		}
 		if d := fs.dirs[dir]; !contains(d, name) {
@@ -245,7 +246,8 @@ func (fs *FileSystem) put(name string, obj object) {
 		} else {
 			return
 		}
-		if len(dir) > 1 {
+		if len(dir) > 1 { // dir != "/"
+			// add parent
 			name = dir
 			dir, _ = path.Split(dir)
 		} else {
@@ -403,12 +405,16 @@ func (d *dir) ModTime() time.Time { return time.Time{} }
 func (d *dir) IsDir() bool        { return true }
 func (d *dir) Sys() interface{}   { return nil }
 
-// ServeHTTP implements http.Handler, replacing the need for http.FileServer.
+// ServeHTTP implements http.Handler using ServeFile.
+// Replaces http.FileServer.
 func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fs.ServeFile(w, r, r.URL.Path)
 }
 
-// Like http.ServeFile. Lists directories with no index.html. Redirects to canonical paths.
+// Like http.ServeFile.
+// Redirects to canonical paths.
+// Serves index.html for directories, 404.html for not found.
+// Doesn't list directories.
 func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name string) {
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
@@ -417,7 +423,9 @@ func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name str
 	fs.serveFile(w, r, path.Clean(name))
 }
 
-// Like http.ServeContent. Serves the named file. Doesn't list directories. No redirects or rewrites.
+// Like http.ServeContent.
+// Serves the named file.
+// No redirects or rewrites.
 func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
 	if o, ok := fs.objs[name]; ok {
 		if setHeaders(w, r, &o) {
@@ -434,13 +442,35 @@ func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name str
 	if _, ok := fs.dirs[name]; ok {
 		name = strings.TrimSuffix(name, "/") + "/index.html"
 	}
-	if o, ok := fs.objs[name]; ok {
+	if o, ok := fs.objs[name]; ok && name != "/404.html" {
 		if setHeaders(w, r, &o) {
 			http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
 			return
 		}
+		http.FileServer(objFileSystem{fs}).ServeHTTP(w, r)
+	} else {
+		fs.notFound(w, r)
 	}
-	http.FileServer(fs).ServeHTTP(w, r)
+}
+
+func (fs *FileSystem) notFound(w http.ResponseWriter, r *http.Request) {
+	if o, ok := fs.objs["/404.html"]; ok {
+		o.mime = "text/html; charset=utf-8"
+		o.hash = 0
+
+		var stream io.ReadSeeker
+		if setHeaders(w, r, &o) {
+			stream = strings.NewReader(o.data)
+		} else {
+			stream = &file{object: o}
+		}
+		if r.Method != "HEAD" {
+			w.WriteHeader(http.StatusNotFound)
+			io.Copy(w, stream)
+		}
+	} else {
+		http.NotFound(w, r)
+	}
 }
 
 func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
@@ -457,7 +487,7 @@ func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
 	}
 	if o.hash != 0 {
 		if tag := strconv.FormatUint(uint64(o.hash), 36); gzip {
-			header.Set("ETag", `"`+tag+`z"`)
+			header.Set("ETag", `"`+tag+`Z"`)
 		} else {
 			header.Set("ETag", `"`+tag+`"`)
 		}
@@ -465,13 +495,26 @@ func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
 	return
 }
 
+// Don't list directories
+type objFileSystem struct {
+	*FileSystem
+}
+
+func (fs objFileSystem) Open(name string) (http.File, error) {
+	if o, ok := fs.objs[name]; ok {
+		return &file{object: o}, nil
+	}
+	return nil, os.ErrNotExist
+}
+
+// Serve raw gzipped objects
 type rawFileSystem struct {
 	*FileSystem
 }
 
 func (fs rawFileSystem) Open(name string) (http.File, error) {
 	if o, ok := fs.objs[name]; ok {
-		return rawFile{o, strings.NewReader(o.data)}, nil
+		return rawFile{strings.NewReader(o.data), o}, nil
 	}
 	if d, ok := fs.dirs[name]; ok {
 		return &dir{name: name, list: d, fs: fs.FileSystem}, nil
@@ -480,8 +523,8 @@ func (fs rawFileSystem) Open(name string) (http.File, error) {
 }
 
 type rawFile struct {
-	os.FileInfo
 	*strings.Reader
+	object
 }
 
 func (f rawFile) Size() int64 {
@@ -500,7 +543,7 @@ func (f rawFile) Stat() (os.FileInfo, error) {
 	return f, nil
 }
 
-func sniffType(name, mimetype string, content io.ReadSeeker) (string, error) {
+func getType(name, mimetype string, content io.ReadSeeker) (string, error) {
 	if mimetype == "" && mime.TypeByExtension(path.Ext(name)) == "" {
 		var buf [512]byte
 		n, _ := io.ReadFull(content, buf[:])
@@ -513,10 +556,19 @@ func sniffType(name, mimetype string, content io.ReadSeeker) (string, error) {
 	return mimetype, nil
 }
 
-func seekerLen(seeker io.Seeker) (n int64, err error) {
+func getSize(seeker io.Seeker) (n int64, err error) {
 	n, err = seeker.Seek(0, io.SeekEnd)
 	if err == nil {
 		_, err = seeker.Seek(0, io.SeekStart)
 	}
 	return
+}
+
+func getHash(data []byte, isize int64) uint32 {
+	if len(data) > 10+8 && data[0] == 0x1f && data[1] == 0x8b {
+		if size := binary.LittleEndian.Uint32(data[len(data)-4:]); size == uint32(isize) {
+			return binary.LittleEndian.Uint32(data[len(data)-8:])
+		}
+	}
+	return 0
 }
