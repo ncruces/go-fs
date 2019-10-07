@@ -102,7 +102,7 @@ func main() {
 	}
 	// build tags
 	if *tagName != "" {
-		*tagName = "// +build " + *tagName + "\n\n"
+		*tagName = "\n\n// +build " + *tagName
 	}
 
 	// identifiers should be valid
