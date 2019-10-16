@@ -447,7 +447,7 @@ func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name str
 			http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
 			return
 		}
-		http.FileServer(objFileSystem{fs}).ServeHTTP(w, r)
+		http.FileServer(fs).ServeHTTP(w, r)
 	} else {
 		fs.notFound(w, r)
 	}
@@ -493,18 +493,6 @@ func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
 		}
 	}
 	return
-}
-
-// Don't list directories
-type objFileSystem struct {
-	*FileSystem
-}
-
-func (fs objFileSystem) Open(name string) (http.File, error) {
-	if o, ok := fs.objs[name]; ok {
-		return &file{object: o}, nil
-	}
-	return nil, os.ErrNotExist
 }
 
 // Serve raw gzipped objects
