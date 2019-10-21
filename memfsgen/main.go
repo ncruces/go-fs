@@ -1,3 +1,4 @@
+// A command to statically generate memfs http.FileSystems.
 package main
 
 import (

@@ -487,7 +487,7 @@ func setHeaders(w http.ResponseWriter, r *http.Request, o *object) (gzip bool) {
 	}
 	if o.hash != 0 {
 		if tag := strconv.FormatUint(uint64(o.hash), 36); gzip {
-			header.Set("ETag", `"`+tag+`Z"`)
+			header.Set("ETag", `W/"`+tag+`"`)
 		} else {
 			header.Set("ETag", `"`+tag+`"`)
 		}
