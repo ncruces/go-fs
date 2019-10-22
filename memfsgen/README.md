@@ -4,6 +4,8 @@
 Usage: memfsgen [options] <source-dir> <target-file>
   -mimetype value
         register a MIME type ("png:image/png", "txt:text/plain"…)
+  -minify
+        minify web assets
   -pkg string
         package name (default: lowercase name of <target-file> directory)
   -tag string

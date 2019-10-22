@@ -15,11 +15,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 	"time"
 
 	"github.com/gabriel-vasile/mimetype"
+	"github.com/tdewolff/minify"
+	"github.com/tdewolff/minify/css"
+	"github.com/tdewolff/minify/html"
+	"github.com/tdewolff/minify/js"
+	"github.com/tdewolff/minify/json"
+	"github.com/tdewolff/minify/svg"
+	"github.com/tdewolff/minify/xml"
 )
 
 type Assets struct {
@@ -33,7 +41,7 @@ type Asset struct {
 	Name  string
 	Type  string
 	Time  int64
-	Size  int64
+	Size  int
 	Hash  uint32
 	Lines <-chan string
 }
@@ -52,18 +60,20 @@ var {{.Variable}} = memfs.Create()
 func init() {
 	var fs = {{.Variable}}
 	{{- range .Assets}}
-	fs.CreateString({{printf "%#v" .Name}}, {{printf "%#v" .Type}},
-		time.Unix({{.Time}}, 0), {{printf "%#08x" .Hash}}, {{.Size}}, ""
+	fs.CreateString({{printf "%#v" .Name}}, {{printf "%#v" .Type}}, time.Unix({{.Time}}, 0), {{printf "%#08x" .Hash}}, {{.Size}}, ""
 		{{- range .Lines}}+
 		"{{.}}"
 		{{- end}})
 	{{- end}}
 }`))
 
+var minifier *minify.M
+
 func main() {
 	tagName := flag.String("tag", "", "build constraint")
 	pkgName := flag.String("pkg", "", "package name (default: lowercase name of <target-file> directory)")
 	varName := flag.String("var", "assets", "variable name")
+	minifie := flag.Bool("minify", false, "minify web assets")
 	flag.Var(mimeTypes, "mimetype", `register a MIME type ("png:image/png", "txt:text/plain"…)`)
 	flag.Usage = usage
 	flag.Parse()
@@ -114,6 +124,16 @@ func main() {
 		fatal("invalid variable name: %s", *varName)
 	}
 
+	if *minifie {
+		minifier = minify.New()
+		minifier.AddFunc("text/css", css.Minify)
+		minifier.AddFunc("text/html", html.Minify)
+		minifier.AddFunc("image/svg+xml", svg.Minify)
+		minifier.AddFuncRegexp(regexp.MustCompile("^(application|text)/(x-)?(java|ecma)script$"), js.Minify)
+		minifier.AddFuncRegexp(regexp.MustCompile("[/+]json$"), json.Minify)
+		minifier.AddFuncRegexp(regexp.MustCompile("[/+]xml$"), xml.Minify)
+	}
+
 	// create target
 	out, err := os.Create(target)
 	if err != nil {
@@ -155,6 +175,11 @@ func walk(root string, assets chan<- Asset) {
 			}
 			path = "/" + filepath.ToSlash(path)
 
+			mime := sniff(path, data)
+			if minifier != nil {
+				data, _ = minifier.Bytes(mime, data)
+			}
+
 			hash.Reset()
 			_, err = hash.Write(data)
 			if err != nil {
@@ -163,7 +188,7 @@ func walk(root string, assets chan<- Asset) {
 
 			modtime := info.ModTime()
 			lines := make(chan string)
-			assets <- Asset{path, sniff(path, data), modtime.Unix(), info.Size(), hash.Sum32(), lines}
+			assets <- Asset{path, mime, modtime.Unix(), len(data), hash.Sum32(), lines}
 			err = dump(compress(data, modtime), lines)
 			close(lines)
 			return err
@@ -254,9 +279,9 @@ func sniff(name string, data []byte) string {
 		return ctype
 	}
 
-	ctype := http.DetectContentType(data)
+	ctype, _ := mimetype.Detect(data)
 	if ctype == "application/octet-stream" {
-		ctype, _ = mimetype.Detect(data)
+		ctype = http.DetectContentType(data)
 	}
 	if ctype == "application/octet-stream" || ctype == "inode/x-empty" {
 		ctype = ""
