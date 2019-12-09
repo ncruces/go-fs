@@ -65,7 +65,8 @@ func init() {
 		"{{.}}"
 		{{- end}})
 	{{- end}}
-}`))
+}
+`))
 
 var minifier *minify.M
 
