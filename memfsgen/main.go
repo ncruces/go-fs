@@ -21,13 +21,13 @@ import (
 	"time"
 
 	"github.com/gabriel-vasile/mimetype"
-	"github.com/tdewolff/minify"
-	"github.com/tdewolff/minify/css"
-	"github.com/tdewolff/minify/html"
-	"github.com/tdewolff/minify/js"
-	"github.com/tdewolff/minify/json"
-	"github.com/tdewolff/minify/svg"
-	"github.com/tdewolff/minify/xml"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/css"
+	"github.com/tdewolff/minify/v2/html"
+	"github.com/tdewolff/minify/v2/js"
+	"github.com/tdewolff/minify/v2/json"
+	"github.com/tdewolff/minify/v2/svg"
+	"github.com/tdewolff/minify/v2/xml"
 )
 
 type Assets struct {
@@ -280,7 +280,7 @@ func sniff(name string, data []byte) string {
 		return ctype
 	}
 
-	ctype, _ := mimetype.Detect(data)
+	ctype := mimetype.Detect(data).String()
 	if ctype == "application/octet-stream" {
 		ctype = http.DetectContentType(data)
 	}
