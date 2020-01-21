@@ -14,14 +14,9 @@ Usage: memfsgen [options] <source-dir> <target-file>
         variable name (default "assets")
 ```
 
-Install:
-```
-go install github.com/ncruces/go-fs/memfsgen
-```
-
 Typical usage will be through `go generate`:
 ```
-//go:generate memfsgen -pkg main -var assets static assets.go
+//go:generate go run github.com/ncruces/go-fs/memfsgen -pkg main -var assets static assets.go
 ```
 
 This generates a single `assets.go` file from the contents of directory `static`.
