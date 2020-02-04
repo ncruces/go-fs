@@ -40,7 +40,7 @@ type FileSystem struct {
 	dirs map[string][]string
 }
 
-// Creates an empty FileSystem instance.
+// Create creates an empty FileSystem instance.
 func Create() *FileSystem {
 	return &FileSystem{
 		objs: map[string]object{},
@@ -48,12 +48,12 @@ func Create() *FileSystem {
 	}
 }
 
-// Loads the contents of an http.FileSystem into a new FileSystem instance.
+// Load loads the contents of an http.FileSystem into a new FileSystem instance.
 func Load(in http.FileSystem) (*FileSystem, error) {
 	return LoadCompressed(in, gzip.NoCompression)
 }
 
-// Loads the contents of an http.FileSystem into a new FileSystem instance.
+// LoadCompressed loads the contents of an http.FileSystem into a new FileSystem instance.
 // Files are gzip-compressed with the specified compression level.
 func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
 	fs := Create()
@@ -113,7 +113,7 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	return nil, os.ErrNotExist
 }
 
-// Creates a file.
+// Create creates a file.
 // Overwrites an existing file (but not a directory).
 // Sniffs the MIME type if none is provided.
 func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
@@ -142,12 +142,12 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 			mime: mimetype,
 			data: buf.String(),
 			hash: hash.Sum32(),
-		})
+		}, false)
 	}
 	return err
 }
 
-// Creates a compressed file.
+// CreateCompressed creates a compressed file.
 // Overwrites an existing file (but not a directory).
 // Files are gzip-compressed with the specified compression level.
 // Sniffs the MIME type if none is provided.
@@ -192,7 +192,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 			mime: mimetype,
 			data: buf.String(),
 			hash: getHash(buf.Bytes(), n),
-		})
+		}, false)
 		return nil
 	}
 
@@ -203,9 +203,12 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 	return err
 }
 
-// Creates a file from a string.
+// CreateString creates a file from a string.
 // This intended to be used by code generators.
+// Bad things happen if you violate its expectations.
+//
 // Overwrites an existing file (panics if it's a directory).
+// Files are expected to be passed in filepath.Walk order.
 // MIME type will NOT be sniffed and content will NOT be compressed.
 // If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
 func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
@@ -219,15 +222,18 @@ func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, has
 		mime: mimetype,
 		data: content,
 		hash: hash,
-	})
+	}, true)
 }
 
-func (fs *FileSystem) put(name string, obj object) {
+func (fs *FileSystem) put(name string, obj object, stack bool) {
 	dir, file := path.Split(name)
 	obj.name = file
 	fs.objs[name] = obj
 
 	var contains = func(slice []string, str string) bool {
+		if stack {
+			return len(slice) > 0 && slice[len(slice)-1] == str
+		}
 		for _, s := range slice {
 			if s == str {
 				return true
@@ -411,7 +417,7 @@ func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fs.ServeFile(w, r, r.URL.Path)
 }
 
-// Like http.ServeFile.
+// ServeFile replaces http.ServeFile.
 // Redirects to canonical paths.
 // Serves index.html for directories, 404.html for not found.
 // Doesn't list directories.
@@ -423,7 +429,7 @@ func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name str
 	fs.serveFile(w, r, path.Clean(name))
 }
 
-// Like http.ServeContent.
+// ServeContent replaces http.ServeContent.
 // Serves the named file.
 // No redirects or rewrites.
 func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
