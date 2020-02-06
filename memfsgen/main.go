@@ -106,10 +106,10 @@ func main() {
 	}
 	// package name defaults to directory name
 	if *pkgName == "" {
-		if s, err := os.Stat(tgtdir); err != nil {
+		if tgtdir, err := filepath.Abs(tgtdir); err != nil {
 			fatal("target-file %s: %v", target, err)
 		} else {
-			*pkgName = strings.ToLower(s.Name())
+			*pkgName = strings.ToLower(filepath.Base(tgtdir))
 		}
 	}
 	// build tags
@@ -119,7 +119,7 @@ func main() {
 
 	// identifiers should be valid
 	if !token.IsIdentifier(*pkgName) {
-		fatal("invalid package name: %s", *varName)
+		fatal("invalid package name: %s", *pkgName)
 	}
 	if !token.IsIdentifier(*varName) {
 		fatal("invalid variable name: %s", *varName)

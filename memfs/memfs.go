@@ -107,8 +107,8 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 	if o, ok := fs.objs[name]; ok {
 		return o, nil
 	}
-	if d, ok := fs.dirs[name]; ok {
-		return &dir{name: name, list: d, fs: fs}, nil
+	if _, ok := fs.dirs[name]; ok {
+		return statDir(name), nil
 	}
 	return nil, os.ErrNotExist
 }
@@ -117,6 +117,9 @@ func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
 // Overwrites an existing file (but not a directory).
 // Sniffs the MIME type if none is provided.
 func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
+	if !strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return os.ErrInvalid
+	}
 	if _, ok := fs.dirs[name]; ok {
 		return os.ErrExist
 	}
@@ -154,6 +157,9 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
 	if level == gzip.NoCompression {
 		return fs.Create(name, mimetype, modtime, content)
+	}
+	if !strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return os.ErrInvalid
 	}
 	if _, ok := fs.dirs[name]; ok {
 		return os.ErrExist
@@ -207,15 +213,11 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 // This intended to be used by code generators.
 // Bad things happen if you violate its expectations.
 //
-// Overwrites an existing file (panics if it's a directory).
+// Overwrites an existing file.
 // Files are expected to be passed in filepath.Walk order.
 // MIME type will NOT be sniffed and content will NOT be compressed.
 // If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
 func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
-	if _, ok := fs.dirs[name]; ok {
-		panic(os.ErrExist)
-	}
-
 	fs.put(name, object{
 		size: size,
 		time: modtime,
@@ -225,41 +227,44 @@ func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, has
 	}, true)
 }
 
-func (fs *FileSystem) put(name string, obj object, stack bool) {
+func (fs *FileSystem) put(name string, obj object, ordered bool) {
 	dir, file := path.Split(name)
 	obj.name = file
 	fs.objs[name] = obj
 
-	var contains = func(slice []string, str string) bool {
-		if stack {
-			return len(slice) > 0 && slice[len(slice)-1] == str
+	var hasFile = func(dir []string, name string) bool {
+		if ordered {
+			return len(dir) > 0 && dir[len(dir)-1] == name
 		}
-		for _, s := range slice {
-			if s == str {
+		for _, s := range dir {
+			if s == name {
 				return true
 			}
 		}
 		return false
 	}
 
-	for {
-		if len(dir) > 1 { // dir != "/"
-			// remove trailing slash
-			dir = dir[:len(dir)-1]
+	var addFile = func(dir string, file string) bool {
+		d := fs.dirs[dir]
+		if hasFile(d, file) {
+			return false
 		}
-		if d := fs.dirs[dir]; !contains(d, name) {
-			fs.dirs[dir] = append(d, name)
-		} else {
-			return
-		}
-		if len(dir) > 1 { // dir != "/"
-			// add parent
+		fs.dirs[dir] = append(d, file)
+		return true
+	}
+
+	for len(dir) > 1 { // dir != "/"
+		// remove trailing slash
+		dir = dir[:len(dir)-1]
+		if addFile(dir, name) {
+			// continue with parent
 			name = dir
 			dir, _ = path.Split(dir)
 		} else {
 			return
 		}
 	}
+	addFile(dir, name)
 }
 
 type object struct {
@@ -401,15 +406,18 @@ func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
 }
 
 func (d *dir) Stat() (os.FileInfo, error) {
-	return d, nil
+	return statDir(d.name), nil
 }
 
-func (d *dir) Name() string       { return d.name[strings.LastIndexByte(d.name, '/')+1:] }
-func (d *dir) Size() int64        { return 0 }
-func (d *dir) Mode() os.FileMode  { return os.ModeDir | 0555 }
-func (d *dir) ModTime() time.Time { return time.Time{} }
-func (d *dir) IsDir() bool        { return true }
-func (d *dir) Sys() interface{}   { return nil }
+type dirStat string
+
+func statDir(dir string) dirStat     { return dirStat(path.Base(dir)) }
+func (d dirStat) Name() string       { return string(d) }
+func (d dirStat) Size() int64        { return 0 }
+func (d dirStat) Mode() os.FileMode  { return os.ModeDir | 0555 }
+func (d dirStat) ModTime() time.Time { return time.Time{} }
+func (d dirStat) IsDir() bool        { return true }
+func (d dirStat) Sys() interface{}   { return nil }
 
 // ServeHTTP implements http.Handler using ServeFile.
 // Replaces http.FileServer.
