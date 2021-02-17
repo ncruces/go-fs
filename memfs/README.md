@@ -1,4 +1,4 @@
-# An in memory http.FileSystem
+# An in memory fs.FS
 
 [![GoDoc](https://godoc.org/github.com/ncruces/go-fs/memfs?status.svg)](https://godoc.org/github.com/ncruces/go-fs/memfs)
 

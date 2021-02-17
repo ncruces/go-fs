@@ -1,4 +1,4 @@
-# A command to generate `memfs` http.FileSystems
+# A command to statically generate a `memfs.FileSystem`
 
 ```
 Usage: memfsgen [options] <source-dir> <target-file>

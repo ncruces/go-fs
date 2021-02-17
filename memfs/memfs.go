@@ -1,4 +1,4 @@
-// Package memfs implements an in memory http.FileSystem.
+// Package memfs implements an in memory fs.FS.
 //
 // The filesystem can be statically generated, or loaded (and modified) at runtime.
 // It is safe for concurrent reads (not writes), and biased towards read performance.
@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"mime"
 	"net/http"
@@ -34,7 +35,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
-// FileSystem is the in memory http.FileSystem implementation.
+// FileSystem is the in memory fs.FS implementation.
 type FileSystem struct {
 	objs map[string]object
 	dirs map[string][]string
@@ -44,7 +45,7 @@ type FileSystem struct {
 func Create() *FileSystem {
 	return &FileSystem{
 		objs: map[string]object{},
-		dirs: map[string][]string{"/": nil},
+		dirs: map[string][]string{".": nil},
 	}
 }
 
@@ -57,7 +58,7 @@ func Load(in http.FileSystem) (*FileSystem, error) {
 // Files are gzip-compressed with the specified compression level.
 func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
 	fs := Create()
-	if err := fs.load(in, "/", level); err != nil {
+	if err := fs.load(in, ".", level); err != nil {
 		return nil, err
 	}
 	return fs, nil
@@ -89,10 +90,10 @@ func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
 	return nil
 }
 
-// Open implements http.FileSystem, opening files for reading.
+// Open implements fs.FS, opening files for reading.
 // Compressed files are decompressed on-the-fly.
 // Seeking compressed files is emulated and can be extremely slow.
-func (fs *FileSystem) Open(name string) (http.File, error) {
+func (fs *FileSystem) Open(name string) (fs.File, error) {
 	if o, ok := fs.objs[name]; ok {
 		return &file{object: o}, nil
 	}
@@ -102,13 +103,17 @@ func (fs *FileSystem) Open(name string) (http.File, error) {
 	return nil, os.ErrNotExist
 }
 
-// Stat is a shortcut for fs.Open(name).Stat().
-func (fs *FileSystem) Stat(name string) (os.FileInfo, error) {
+// Stat implements fs.StatFS, returning a fs.FileInfo that describes the file.
+func (fs *FileSystem) Stat(name string) (fs.FileInfo, error) {
+	return fs.stat(name)
+}
+
+func (fs *FileSystem) stat(name string) (entryInfo, error) {
 	if o, ok := fs.objs[name]; ok {
 		return o, nil
 	}
 	if _, ok := fs.dirs[name]; ok {
-		return statDir(name), nil
+		return newDirInfo(name), nil
 	}
 	return nil, os.ErrNotExist
 }
@@ -276,12 +281,14 @@ type object struct {
 	hash uint32
 }
 
-func (o object) Name() string       { return o.name }
-func (o object) Size() int64        { return int64(o.size) }
-func (o object) Mode() os.FileMode  { return 0444 }
-func (o object) ModTime() time.Time { return o.time }
-func (o object) IsDir() bool        { return false }
-func (o object) Sys() interface{}   { return nil }
+func (o object) Name() string               { return o.name }
+func (o object) IsDir() bool                { return false }
+func (o object) Type() fs.FileMode          { return 0 }
+func (o object) Info() (fs.FileInfo, error) { return o, nil }
+func (o object) Size() int64                { return int64(o.size) }
+func (o object) Mode() os.FileMode          { return 0444 }
+func (o object) ModTime() time.Time         { return o.time }
+func (o object) Sys() interface{}           { return nil }
 
 type file struct {
 	object
@@ -349,10 +356,6 @@ func (f *file) Seek(offset int64, whence int) (int64, error) {
 	return npos, nil
 }
 
-func (f *file) Readdir(count int) ([]os.FileInfo, error) {
-	return nil, os.ErrInvalid
-}
-
 func (f *file) Stat() (os.FileInfo, error) {
 	return f, nil
 }
@@ -382,6 +385,23 @@ func (d *dir) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
+	entries, err := d.ReadDir(count)
+	if err != nil {
+		return nil, err
+	}
+
+	var ret []os.FileInfo
+	for _, e := range entries {
+		i, err := e.Info()
+		if err != nil {
+			return ret, err
+		}
+		ret = append(ret, i)
+	}
+	return ret, nil
+}
+
+func (d *dir) ReadDir(count int) ([]fs.DirEntry, error) {
 	if d.pos < 0 {
 		return nil, os.ErrClosed
 	}
@@ -392,9 +412,9 @@ func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
 		return nil, io.EOF
 	}
 
-	var ret []os.FileInfo
+	var ret []fs.DirEntry
 	for d.pos < len(d.list) && count > 0 {
-		s, err := d.fs.Stat(d.list[d.pos])
+		s, err := d.fs.stat(d.list[d.pos])
 		if err != nil {
 			return ret, err
 		}
@@ -406,18 +426,20 @@ func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
 }
 
 func (d *dir) Stat() (os.FileInfo, error) {
-	return statDir(d.name), nil
+	return newDirInfo(d.name), nil
 }
 
-type dirStat string
+type dirInfo string
 
-func statDir(dir string) dirStat     { return dirStat(path.Base(dir)) }
-func (d dirStat) Name() string       { return string(d) }
-func (d dirStat) Size() int64        { return 0 }
-func (d dirStat) Mode() os.FileMode  { return os.ModeDir | 0555 }
-func (d dirStat) ModTime() time.Time { return time.Time{} }
-func (d dirStat) IsDir() bool        { return true }
-func (d dirStat) Sys() interface{}   { return nil }
+func newDirInfo(dir string) dirInfo          { return dirInfo(path.Base(dir)) }
+func (d dirInfo) Name() string               { return string(d) }
+func (d dirInfo) IsDir() bool                { return true }
+func (d dirInfo) Type() fs.FileMode          { return os.ModeDir }
+func (d dirInfo) Info() (fs.FileInfo, error) { return d, nil }
+func (d dirInfo) Size() int64                { return 0 }
+func (d dirInfo) Mode() os.FileMode          { return os.ModeDir | 0555 }
+func (d dirInfo) ModTime() time.Time         { return time.Time{} }
+func (d dirInfo) Sys() interface{}           { return nil }
 
 // ServeHTTP implements http.Handler using ServeFile.
 // Replaces http.FileServer.
@@ -461,7 +483,7 @@ func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name str
 			http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
 			return
 		}
-		http.FileServer(fs).ServeHTTP(w, r)
+		http.FileServer(http.FS(fs)).ServeHTTP(w, r)
 	} else {
 		fs.notFound(w, r)
 	}
@@ -573,4 +595,16 @@ func getHash(data []byte, isize int64) uint32 {
 		}
 	}
 	return 0
+}
+
+// Check interface implementations
+var _ fs.StatFS = &FileSystem{}
+var _ fs.File = &file{}
+var _ fs.ReadDirFile = &dir{}
+var _ entryInfo = object{}
+var _ entryInfo = dirInfo("")
+
+type entryInfo interface {
+	fs.FileInfo
+	fs.DirEntry
 }
