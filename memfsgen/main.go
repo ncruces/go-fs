@@ -174,7 +174,7 @@ func walk(root string, assets chan<- Asset) {
 			if err != nil {
 				return err
 			}
-			path = "/" + filepath.ToSlash(path)
+			path = filepath.ToSlash(path)
 
 			mime := sniff(path, data)
 			if minifier != nil {

@@ -236,7 +236,7 @@ func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 	obj.name = file
 	fsys.objs[name] = obj
 
-	var hasFile = func(dir []string, name string) bool {
+	hasFile := func(dir []string, name string) bool {
 		if ordered {
 			return len(dir) > 0 && dir[len(dir)-1] == name
 		}
@@ -248,7 +248,7 @@ func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 		return false
 	}
 
-	var addFile = func(dir string, file string) bool {
+	addFile := func(dir string, file string) bool {
 		d := fsys.dirs[dir]
 		if hasFile(d, file) {
 			return false
@@ -257,7 +257,7 @@ func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 		return true
 	}
 
-	for len(dir) > 1 { // dir != "/"
+	for len(dir) > 0 {
 		// remove trailing slash
 		dir = dir[:len(dir)-1]
 		if addFile(dir, name) {
@@ -268,7 +268,7 @@ func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 			return
 		}
 	}
-	addFile(dir, name)
+	addFile(".", name)
 }
 
 type object struct {
