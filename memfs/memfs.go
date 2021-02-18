@@ -13,7 +13,7 @@
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	log.Fatal(http.ListenAndServe("localhost:http", fs))
+//	log.Fatal(http.ListenAndServe("localhost:http", assets))
 package memfs
 
 import (
@@ -26,7 +26,6 @@ import (
 	"io/ioutil"
 	"mime"
 	"net/http"
-	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -57,14 +56,14 @@ func Load(in http.FileSystem) (*FileSystem, error) {
 // LoadCompressed loads the contents of an http.FileSystem into a new FileSystem instance.
 // Files are gzip-compressed with the specified compression level.
 func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
-	fs := Create()
-	if err := fs.load(in, ".", level); err != nil {
+	fsys := Create()
+	if err := fsys.load(in, ".", level); err != nil {
 		return nil, err
 	}
-	return fs, nil
+	return fsys, nil
 }
 
-func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
+func (fsys *FileSystem) load(in http.FileSystem, name string, level int) error {
 	dir, err := in.Open(name)
 	if err != nil {
 		return err
@@ -76,11 +75,11 @@ func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
 	for _, c := range chldn {
 		name := path.Join(name, c.Name())
 		if c.IsDir() {
-			err = fs.load(in, name, level)
+			err = fsys.load(in, name, level)
 		} else {
 			var file http.File
 			if file, err = in.Open(name); err == nil {
-				err = fs.CreateCompressed(name, "", c.ModTime(), file, level)
+				err = fsys.CreateCompressed(name, "", c.ModTime(), file, level)
 			}
 		}
 		if err != nil {
@@ -93,40 +92,40 @@ func (fs *FileSystem) load(in http.FileSystem, name string, level int) error {
 // Open implements fs.FS, opening files for reading.
 // Compressed files are decompressed on-the-fly.
 // Seeking compressed files is emulated and can be extremely slow.
-func (fs *FileSystem) Open(name string) (fs.File, error) {
-	if o, ok := fs.objs[name]; ok {
+func (fsys *FileSystem) Open(name string) (fs.File, error) {
+	if o, ok := fsys.objs[name]; ok {
 		return &file{object: o}, nil
 	}
-	if d, ok := fs.dirs[name]; ok {
-		return &dir{name: name, list: d, fs: fs}, nil
+	if d, ok := fsys.dirs[name]; ok {
+		return &dir{name: name, list: d, fsys: fsys}, nil
 	}
-	return nil, os.ErrNotExist
+	return nil, fs.ErrNotExist
 }
 
 // Stat implements fs.StatFS, returning a fs.FileInfo that describes the file.
-func (fs *FileSystem) Stat(name string) (fs.FileInfo, error) {
-	return fs.stat(name)
+func (fsys *FileSystem) Stat(name string) (fs.FileInfo, error) {
+	return fsys.stat(name)
 }
 
-func (fs *FileSystem) stat(name string) (entryInfo, error) {
-	if o, ok := fs.objs[name]; ok {
+func (fsys *FileSystem) stat(name string) (entryInfo, error) {
+	if o, ok := fsys.objs[name]; ok {
 		return o, nil
 	}
-	if _, ok := fs.dirs[name]; ok {
+	if _, ok := fsys.dirs[name]; ok {
 		return newDirInfo(name), nil
 	}
-	return nil, os.ErrNotExist
+	return nil, fs.ErrNotExist
 }
 
 // Create creates a file.
 // Overwrites an existing file (but not a directory).
 // Sniffs the MIME type if none is provided.
-func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
-	if !strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
-		return os.ErrInvalid
+func (fsys *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
+	if !fs.ValidPath(name) {
+		return fs.ErrInvalid
 	}
-	if _, ok := fs.dirs[name]; ok {
-		return os.ErrExist
+	if _, ok := fsys.dirs[name]; ok {
+		return fs.ErrExist
 	}
 
 	mimetype, err := getType(name, mimetype, content)
@@ -144,7 +143,7 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 
 	n, err = io.Copy(io.MultiWriter(&buf, hash), content)
 	if err == nil {
-		fs.put(name, object{
+		fsys.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
@@ -159,15 +158,15 @@ func (fs *FileSystem) Create(name, mimetype string, modtime time.Time, content i
 // Overwrites an existing file (but not a directory).
 // Files are gzip-compressed with the specified compression level.
 // Sniffs the MIME type if none is provided.
-func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
+func (fsys *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
 	if level == gzip.NoCompression {
-		return fs.Create(name, mimetype, modtime, content)
+		return fsys.Create(name, mimetype, modtime, content)
 	}
-	if !strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
-		return os.ErrInvalid
+	if !fs.ValidPath(name) {
+		return fs.ErrInvalid
 	}
-	if _, ok := fs.dirs[name]; ok {
-		return os.ErrExist
+	if _, ok := fsys.dirs[name]; ok {
+		return fs.ErrExist
 	}
 
 	mimetype, err := getType(name, mimetype, content)
@@ -179,7 +178,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 		return err
 	}
 	if n < 1024 {
-		return fs.Create(name, mimetype, modtime, content)
+		return fsys.Create(name, mimetype, modtime, content)
 	}
 
 	var buf bytes.Buffer
@@ -197,7 +196,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 		err = gzip.Close()
 	}
 	if err == nil && 4*n >= 5*int64(buf.Len()) {
-		fs.put(name, object{
+		fsys.put(name, object{
 			size: int(n),
 			time: modtime,
 			mime: mimetype,
@@ -209,7 +208,7 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 
 	_, err = content.Seek(0, io.SeekStart)
 	if err == nil {
-		return fs.Create(name, mimetype, modtime, content)
+		return fsys.Create(name, mimetype, modtime, content)
 	}
 	return err
 }
@@ -219,11 +218,11 @@ func (fs *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time,
 // Bad things happen if you violate its expectations.
 //
 // Overwrites an existing file.
-// Files are expected to be passed in filepath.Walk order.
+// Files are expected to be passed in fs.WalkDir order.
 // MIME type will NOT be sniffed and content will NOT be compressed.
 // If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
-func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
-	fs.put(name, object{
+func (fsys *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
+	fsys.put(name, object{
 		size: size,
 		time: modtime,
 		mime: mimetype,
@@ -232,10 +231,10 @@ func (fs *FileSystem) CreateString(name, mimetype string, modtime time.Time, has
 	}, true)
 }
 
-func (fs *FileSystem) put(name string, obj object, ordered bool) {
+func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 	dir, file := path.Split(name)
 	obj.name = file
-	fs.objs[name] = obj
+	fsys.objs[name] = obj
 
 	var hasFile = func(dir []string, name string) bool {
 		if ordered {
@@ -250,11 +249,11 @@ func (fs *FileSystem) put(name string, obj object, ordered bool) {
 	}
 
 	var addFile = func(dir string, file string) bool {
-		d := fs.dirs[dir]
+		d := fsys.dirs[dir]
 		if hasFile(d, file) {
 			return false
 		}
-		fs.dirs[dir] = append(d, file)
+		fsys.dirs[dir] = append(d, file)
 		return true
 	}
 
@@ -286,7 +285,7 @@ func (o object) IsDir() bool                { return false }
 func (o object) Type() fs.FileMode          { return 0 }
 func (o object) Info() (fs.FileInfo, error) { return o, nil }
 func (o object) Size() int64                { return int64(o.size) }
-func (o object) Mode() os.FileMode          { return 0444 }
+func (o object) Mode() fs.FileMode          { return 0444 }
 func (o object) ModTime() time.Time         { return o.time }
 func (o object) Sys() interface{}           { return nil }
 
@@ -306,7 +305,7 @@ func (f *file) Close() error {
 
 func (f *file) Read(p []byte) (n int, err error) {
 	if f.pos < 0 {
-		return 0, os.ErrClosed
+		return 0, fs.ErrClosed
 	}
 	if f.pos >= f.size {
 		return 0, io.EOF
@@ -334,7 +333,7 @@ func (f *file) Read(p []byte) (n int, err error) {
 
 func (f *file) Seek(offset int64, whence int) (int64, error) {
 	if f.pos < 0 {
-		return 0, os.ErrClosed
+		return 0, fs.ErrClosed
 	}
 	var npos int64
 	switch whence {
@@ -345,18 +344,18 @@ func (f *file) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekEnd:
 		npos = int64(f.size) + offset
 	default:
-		return 0, os.ErrInvalid
+		return 0, fs.ErrInvalid
 	}
 	ipos := int(npos)
 	if ipos < 0 || npos != int64(ipos) {
-		return 0, os.ErrInvalid
+		return 0, fs.ErrInvalid
 	}
 	f.pos = ipos
 	f.reader = nil
 	return npos, nil
 }
 
-func (f *file) Stat() (os.FileInfo, error) {
+func (f *file) Stat() (fs.FileInfo, error) {
 	return f, nil
 }
 
@@ -364,7 +363,7 @@ type dir struct {
 	name string
 	pos  int
 	list []string
-	fs   *FileSystem
+	fsys *FileSystem
 }
 
 func (d *dir) Close() error {
@@ -374,23 +373,23 @@ func (d *dir) Close() error {
 
 func (d *dir) Read(p []byte) (n int, err error) {
 	if d.pos < 0 {
-		return 0, os.ErrClosed
+		return 0, fs.ErrClosed
 	} else {
 		return 0, io.EOF
 	}
 }
 
 func (d *dir) Seek(offset int64, whence int) (int64, error) {
-	return 0, os.ErrInvalid
+	return 0, fs.ErrInvalid
 }
 
-func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
+func (d *dir) Readdir(count int) ([]fs.FileInfo, error) {
 	entries, err := d.ReadDir(count)
 	if err != nil {
 		return nil, err
 	}
 
-	var ret []os.FileInfo
+	var ret []fs.FileInfo
 	for _, e := range entries {
 		i, err := e.Info()
 		if err != nil {
@@ -403,7 +402,7 @@ func (d *dir) Readdir(count int) ([]os.FileInfo, error) {
 
 func (d *dir) ReadDir(count int) ([]fs.DirEntry, error) {
 	if d.pos < 0 {
-		return nil, os.ErrClosed
+		return nil, fs.ErrClosed
 	}
 
 	if count <= 0 {
@@ -414,7 +413,7 @@ func (d *dir) ReadDir(count int) ([]fs.DirEntry, error) {
 
 	var ret []fs.DirEntry
 	for d.pos < len(d.list) && count > 0 {
-		s, err := d.fs.stat(d.list[d.pos])
+		s, err := d.fsys.stat(d.list[d.pos])
 		if err != nil {
 			return ret, err
 		}
@@ -425,7 +424,7 @@ func (d *dir) ReadDir(count int) ([]fs.DirEntry, error) {
 	return ret, nil
 }
 
-func (d *dir) Stat() (os.FileInfo, error) {
+func (d *dir) Stat() (fs.FileInfo, error) {
 	return newDirInfo(d.name), nil
 }
 
@@ -434,29 +433,29 @@ type dirInfo string
 func newDirInfo(dir string) dirInfo          { return dirInfo(path.Base(dir)) }
 func (d dirInfo) Name() string               { return string(d) }
 func (d dirInfo) IsDir() bool                { return true }
-func (d dirInfo) Type() fs.FileMode          { return os.ModeDir }
+func (d dirInfo) Type() fs.FileMode          { return fs.ModeDir }
 func (d dirInfo) Info() (fs.FileInfo, error) { return d, nil }
 func (d dirInfo) Size() int64                { return 0 }
-func (d dirInfo) Mode() os.FileMode          { return os.ModeDir | 0555 }
+func (d dirInfo) Mode() fs.FileMode          { return fs.ModeDir | 0555 }
 func (d dirInfo) ModTime() time.Time         { return time.Time{} }
 func (d dirInfo) Sys() interface{}           { return nil }
 
 // ServeHTTP implements http.Handler using ServeFile.
 // Replaces http.FileServer.
-func (fs *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	fs.ServeFile(w, r, r.URL.Path)
+func (fsys *FileSystem) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	fsys.ServeFile(w, r, r.URL.Path)
 }
 
 // ServeFile replaces http.ServeFile.
 // Redirects to canonical paths.
 // Serves index.html for directories, 404.html for not found.
 // Doesn't list directories.
-func (fs *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name string) {
+func (fsys *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name string) {
 	if !strings.HasPrefix(name, "/") {
 		name = "/" + name
 	}
 	r.URL.Path = name
-	fs.serveFile(w, r, path.Clean(name))
+	fsys.serveFile(w, r, path.Clean(name))
 }
 
 // ServeContent replaces http.ServeContent.
@@ -474,23 +473,23 @@ func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name 
 	}
 }
 
-func (fs *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name string) {
-	if _, ok := fs.dirs[name]; ok {
+func (fsys *FileSystem) serveFile(w http.ResponseWriter, r *http.Request, name string) {
+	if _, ok := fsys.dirs[name]; ok {
 		name = strings.TrimSuffix(name, "/") + "/index.html"
 	}
-	if o, ok := fs.objs[name]; ok && name != "/404.html" {
+	if o, ok := fsys.objs[name]; ok && name != "/404.html" {
 		if setHeaders(w, r, &o) {
-			http.FileServer(rawFileSystem{fs}).ServeHTTP(w, r)
+			http.FileServer(rawFileSystem{fsys}).ServeHTTP(w, r)
 			return
 		}
-		http.FileServer(http.FS(fs)).ServeHTTP(w, r)
+		http.FileServer(http.FS(fsys)).ServeHTTP(w, r)
 	} else {
-		fs.notFound(w, r)
+		fsys.notFound(w, r)
 	}
 }
 
-func (fs *FileSystem) notFound(w http.ResponseWriter, r *http.Request) {
-	if o, ok := fs.objs["/404.html"]; ok {
+func (fsys *FileSystem) notFound(w http.ResponseWriter, r *http.Request) {
+	if o, ok := fsys.objs["/404.html"]; ok {
 		o.mime = "text/html; charset=utf-8"
 		o.hash = 0
 
@@ -536,14 +535,14 @@ type rawFileSystem struct {
 	*FileSystem
 }
 
-func (fs rawFileSystem) Open(name string) (http.File, error) {
-	if o, ok := fs.objs[name]; ok {
+func (fsys rawFileSystem) Open(name string) (http.File, error) {
+	if o, ok := fsys.objs[name]; ok {
 		return rawFile{strings.NewReader(o.data), o}, nil
 	}
-	if d, ok := fs.dirs[name]; ok {
-		return &dir{name: name, list: d, fs: fs.FileSystem}, nil
+	if d, ok := fsys.dirs[name]; ok {
+		return &dir{name: name, list: d, fsys: fsys.FileSystem}, nil
 	}
-	return nil, os.ErrNotExist
+	return nil, fs.ErrNotExist
 }
 
 type rawFile struct {
@@ -559,11 +558,11 @@ func (f rawFile) Close() error {
 	return nil
 }
 
-func (f rawFile) Readdir(count int) ([]os.FileInfo, error) {
-	return nil, os.ErrInvalid
+func (f rawFile) Readdir(count int) ([]fs.FileInfo, error) {
+	return nil, fs.ErrInvalid
 }
 
-func (f rawFile) Stat() (os.FileInfo, error) {
+func (f rawFile) Stat() (fs.FileInfo, error) {
 	return f, nil
 }
 
