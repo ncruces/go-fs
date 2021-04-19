@@ -2,7 +2,7 @@ package memfs_test
 
 import (
 	"compress/gzip"
-	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -19,7 +19,7 @@ func TestCreate(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	fsys, err := memfs.LoadCompressed(http.Dir("."), gzip.BestCompression)
+	fsys, err := memfs.LoadCompressed(os.DirFS("."), gzip.BestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}

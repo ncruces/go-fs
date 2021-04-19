@@ -1,11 +1,10 @@
-// Package memfs implements an in memory fs.FS.
+// Package memfs implements an in memory io/fs.FS.
 //
 // The filesystem can be statically generated, or loaded (and modified) at runtime.
 // It is safe for concurrent reads (not writes), and biased towards read performance.
 //
-// File names should be slash separated, and rooted (start with a slash).
-// Directories are implicit.
-// Files can be gzip-compressed in memory.
+// File names should be valid according to io/fs.ValidPath.
+// Directories are implicit. Files can be gzip-compressed in memory.
 // Methods are provided to serve gziped content directly to accepting HTTP clients.
 //
 // Usage:
@@ -34,7 +33,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
-// FileSystem is the in memory fs.FS implementation.
+// FileSystem is the in memory io/fs.FS implementation.
 type FileSystem struct {
 	objs map[string]object
 	dirs map[string][]string
@@ -48,48 +47,34 @@ func Create() *FileSystem {
 	}
 }
 
-// Load loads the contents of an http.FileSystem into a new FileSystem instance.
-func Load(in http.FileSystem) (*FileSystem, error) {
+// Load loads the contents of an io/fs.FS into a new FileSystem instance.
+func Load(in fs.FS) (*FileSystem, error) {
 	return LoadCompressed(in, gzip.NoCompression)
 }
 
-// LoadCompressed loads the contents of an http.FileSystem into a new FileSystem instance.
+// LoadCompressed loads the contents of an io/fs.FS into a new FileSystem instance.
 // Files are gzip-compressed with the specified compression level.
-func LoadCompressed(in http.FileSystem, level int) (*FileSystem, error) {
+func LoadCompressed(in fs.FS, level int) (*FileSystem, error) {
 	fsys := Create()
-	if err := fsys.load(in, ".", level); err != nil {
+	err := fs.WalkDir(in, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		if file, err := in.Open(path); err != nil {
+			return err
+		} else if info, err := d.Info(); err != nil {
+			return err
+		} else {
+			return fsys.CreateCompressed(path, "", info.ModTime(), file, level)
+		}
+	})
+	if err != nil {
 		return nil, err
 	}
 	return fsys, nil
 }
 
-func (fsys *FileSystem) load(in http.FileSystem, name string, level int) error {
-	dir, err := in.Open(name)
-	if err != nil {
-		return err
-	}
-	chldn, err := dir.Readdir(0)
-	if err != nil {
-		return err
-	}
-	for _, c := range chldn {
-		name := path.Join(name, c.Name())
-		if c.IsDir() {
-			err = fsys.load(in, name, level)
-		} else {
-			var file http.File
-			if file, err = in.Open(name); err == nil {
-				err = fsys.CreateCompressed(name, "", c.ModTime(), file, level)
-			}
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// Open implements fs.FS, opening files for reading.
+// Open implements io/fs.FS, opening files for reading.
 // Compressed files are decompressed on-the-fly.
 // Seeking compressed files is emulated and can be extremely slow.
 func (fsys *FileSystem) Open(name string) (fs.File, error) {
@@ -102,7 +87,7 @@ func (fsys *FileSystem) Open(name string) (fs.File, error) {
 	return nil, fs.ErrNotExist
 }
 
-// Stat implements fs.StatFS, returning a fs.FileInfo that describes the file.
+// Stat implements io/fs.StatFS, returning a io/fs.FileInfo that describes the file.
 func (fsys *FileSystem) Stat(name string) (fs.FileInfo, error) {
 	return fsys.stat(name)
 }
@@ -120,7 +105,7 @@ func (fsys *FileSystem) stat(name string) (entryInfo, error) {
 // Create creates a file.
 // Overwrites an existing file (but not a directory).
 // Sniffs the MIME type if none is provided.
-func (fsys *FileSystem) Create(name, mimetype string, modtime time.Time, content io.ReadSeeker) error {
+func (fsys *FileSystem) Create(name, mimetype string, modtime time.Time, r io.Reader) error {
 	if !fs.ValidPath(name) {
 		return fs.ErrInvalid
 	}
@@ -128,27 +113,14 @@ func (fsys *FileSystem) Create(name, mimetype string, modtime time.Time, content
 		return fs.ErrExist
 	}
 
-	mimetype, err := getType(name, mimetype, content)
-	if err != nil {
-		return err
-	}
-	n, err := getSize(content)
-	if err != nil {
-		return err
-	}
-
-	var hash = crc32.New(crc32.MakeTable(crc32.Castagnoli))
-	var buf strings.Builder
-	buf.Grow(int(n))
-
-	n, err = io.Copy(io.MultiWriter(&buf, hash), content)
+	data, err := io.ReadAll(r)
 	if err == nil {
 		fsys.put(name, object{
-			size: int(n),
+			data: string(data),
+			size: len(data),
 			time: modtime,
-			mime: mimetype,
-			data: buf.String(),
-			hash: hash.Sum32(),
+			mime: getType(mimetype, name, data),
+			hash: crc32.Checksum(data, crc32.MakeTable(crc32.Castagnoli)),
 		}, false)
 	}
 	return err
@@ -158,9 +130,9 @@ func (fsys *FileSystem) Create(name, mimetype string, modtime time.Time, content
 // Overwrites an existing file (but not a directory).
 // Files are gzip-compressed with the specified compression level.
 // Sniffs the MIME type if none is provided.
-func (fsys *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, content io.ReadSeeker, level int) error {
+func (fsys *FileSystem) CreateCompressed(name, mimetype string, modtime time.Time, r io.Reader, level int) error {
 	if level == gzip.NoCompression {
-		return fsys.Create(name, mimetype, modtime, content)
+		return fsys.Create(name, mimetype, modtime, r)
 	}
 	if !fs.ValidPath(name) {
 		return fs.ErrInvalid
@@ -169,48 +141,39 @@ func (fsys *FileSystem) CreateCompressed(name, mimetype string, modtime time.Tim
 		return fs.ErrExist
 	}
 
-	mimetype, err := getType(name, mimetype, content)
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
-	n, err := getSize(content)
-	if err != nil {
-		return err
-	}
-	if n < 1024 {
-		return fsys.Create(name, mimetype, modtime, content)
+	if len(data) >= 1024 {
+		var buf bytes.Buffer
+		buf.Grow(len(data))
+
+		gzip, err := gzip.NewWriterLevel(&buf, level)
+		if err != nil {
+			return err
+		}
+		defer gzip.Close()
+		gzip.ModTime = modtime
+		_, gzip.Name = path.Split(name)
+
+		n, err := io.Copy(gzip, bytes.NewReader(data))
+		if err == nil {
+			err = gzip.Close()
+		}
+		if err == nil && 4*n >= 5*int64(buf.Len()) {
+			fsys.put(name, object{
+				data: buf.String(),
+				size: len(data),
+				time: modtime,
+				mime: getType(mimetype, name, data),
+				hash: getHash(buf.Bytes(), n),
+			}, false)
+			return nil
+		}
 	}
 
-	var buf bytes.Buffer
-	buf.Grow(int(n))
-
-	gzip, err := gzip.NewWriterLevel(&buf, level)
-	if err != nil {
-		return err
-	}
-	defer gzip.Close()
-	gzip.ModTime = modtime
-
-	n, err = io.Copy(gzip, content)
-	if err == nil {
-		err = gzip.Close()
-	}
-	if err == nil && 4*n >= 5*int64(buf.Len()) {
-		fsys.put(name, object{
-			size: int(n),
-			time: modtime,
-			mime: mimetype,
-			data: buf.String(),
-			hash: getHash(buf.Bytes(), n),
-		}, false)
-		return nil
-	}
-
-	_, err = content.Seek(0, io.SeekStart)
-	if err == nil {
-		return fsys.Create(name, mimetype, modtime, content)
-	}
-	return err
+	return fsys.Create(name, mimetype, modtime, bytes.NewReader(data))
 }
 
 // CreateString creates a file from a string.
@@ -218,7 +181,7 @@ func (fsys *FileSystem) CreateCompressed(name, mimetype string, modtime time.Tim
 // Bad things happen if you violate its expectations.
 //
 // Overwrites an existing file.
-// Files are expected to be passed in fs.WalkDir order.
+// Files are expected to be passed in io/fs.WalkDir order.
 // MIME type will NOT be sniffed and content will NOT be compressed.
 // If size != len(content), content is assumed to be gzip-compressed, and size its uncompressed size.
 func (fsys *FileSystem) CreateString(name, mimetype string, modtime time.Time, hash uint32, size int, content string) {
@@ -248,25 +211,24 @@ func (fsys *FileSystem) put(name string, obj object, ordered bool) {
 		return false
 	}
 
-	addFile := func(dir string, file string) bool {
-		d := fsys.dirs[dir]
-		if hasFile(d, file) {
-			return false
+	addFile := func(dir, name string) bool {
+		d, ok := fsys.dirs[dir]
+		if ok && hasFile(d, name) {
+			return true
 		}
-		fsys.dirs[dir] = append(d, file)
-		return true
+		fsys.dirs[dir] = append(d, name)
+		return false
 	}
 
 	for len(dir) > 0 {
 		// remove trailing slash
 		dir = dir[:len(dir)-1]
 		if addFile(dir, name) {
-			// continue with parent
-			name = dir
-			dir, _ = path.Split(dir)
-		} else {
 			return
 		}
+		// continue with parent
+		name = dir
+		dir, _ = path.Split(dir)
 	}
 	addFile(".", name)
 }
@@ -566,25 +528,14 @@ func (f rawFile) Stat() (fs.FileInfo, error) {
 	return f, nil
 }
 
-func getType(name, mimetype string, content io.ReadSeeker) (string, error) {
-	if mimetype == "" && mime.TypeByExtension(path.Ext(name)) == "" {
-		var buf [512]byte
-		n, _ := io.ReadFull(content, buf[:])
-		mimetype = http.DetectContentType(buf[:n])
-		_, err := content.Seek(0, io.SeekStart)
-		if err != nil {
-			return "", err
-		}
+func getType(mimetype, name string, data []byte) string {
+	if mimetype == "" {
+		mimetype = mime.TypeByExtension(path.Ext(name))
 	}
-	return mimetype, nil
-}
-
-func getSize(seeker io.Seeker) (n int64, err error) {
-	n, err = seeker.Seek(0, io.SeekEnd)
-	if err == nil {
-		_, err = seeker.Seek(0, io.SeekStart)
+	if mimetype == "" {
+		mimetype = http.DetectContentType(data)
 	}
-	return
+	return mimetype
 }
 
 func getHash(data []byte, isize int64) uint32 {
