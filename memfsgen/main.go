@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"go/token"
 	"hash/crc32"
-	"io/ioutil"
 	"mime"
 	"net/http"
 	"os"
@@ -165,7 +164,7 @@ func walk(root string, assets chan<- Asset) {
 	var hash = crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {
-			data, err := ioutil.ReadFile(path)
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return err
 			}
