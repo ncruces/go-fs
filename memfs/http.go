@@ -47,8 +47,8 @@ func (fsys *FileSystem) ServeFile(w http.ResponseWriter, r *http.Request, name s
 // ServeContent replaces http.ServeContent.
 // Serves the named file.
 // No redirects or rewrites.
-func (fs *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
-	if o, ok := fs.objs[name]; ok {
+func (fsys *FileSystem) ServeContent(w http.ResponseWriter, r *http.Request, name string) {
+	if o, ok := fsys.objs[name]; ok {
 		var reader io.ReadSeeker
 		if o.setHeaders(w, r) {
 			reader = strings.NewReader(o.data)
