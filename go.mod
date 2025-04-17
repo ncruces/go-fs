@@ -5,7 +5,7 @@ go 1.23.0
 require (
 	github.com/gabriel-vasile/mimetype v1.4.8
 	github.com/tdewolff/minify/v2 v2.21.3
-	golang.org/x/net v0.37.0
+	golang.org/x/net v0.38.0
 )
 
 require (
